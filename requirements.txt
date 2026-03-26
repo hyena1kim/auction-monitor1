@@ -1,6 +1,8 @@
-pandas==2.2.1
-selenium==4.18.1
-playwright==1.42.0
-openpyxl==3.1.2
-requests==2.31.0
-webdriver-manager==4.0.1
+streamlit
+pandas
+selenium
+playwright
+webdriver-manager
+openpyxl
+requests
+asyncio
