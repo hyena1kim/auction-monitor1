@@ -1,7 +1,6 @@
 streamlit
 pandas
 playwright==1.42.0
-playwright-stealth
 openpyxl
 requests
 asyncio
