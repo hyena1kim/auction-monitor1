@@ -8,12 +8,17 @@ if not os.path.exists(os.path.expanduser("~/.cache/ms-playwright")):
 
 st.set_page_config(page_title="Auction Monitor", page_icon="🏢", layout="wide")
 import pandas as pd
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+import time
+import io
+import requests
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font
+import asyncio
+import sys
+import tempfile
+from playwright.async_api import async_playwright
 import time
 import io
 import requests
@@ -27,233 +32,206 @@ import tempfile
 from playwright.async_api import async_playwright
 
 # --- 브라우저 설정 ---
-def init_driver():
-    options = webdriver.ChromeOptions()
-    # 클라우드 환경에서는 반드시 헤드리스 모드로 실행해야 합니다.
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--remote-debugging-port=9222')
-    options.add_argument('--disable-extensions')
-    options.add_argument('--disable-blink-features=AutomationControlled')
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    
-    try:
-        # webdriver_manager를 사용하여 드라이버를 자동 설치/관리합니다.
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-    except Exception as e:
-        st.error(f"드라이버 초기화 실패: {e}")
-        raise e
-
-    # user-agent 변경
-    driver.execute_cdp_cmd('Network.setUserAgentOverride', {
-        "userAgent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-    })
-    return driver
+# --- 브라우저 설정 helper ---
+async def get_browser_context(p):
+    browser = await p.chromium.launch(headless=True)
+    context = await browser.new_context(
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+    )
+    return browser, context
 
 # --- 1. 서울옥션 데이터 수집 ---
-def scrape_seoul(driver):
+# --- 1. 서울옥션 데이터 수집 (Playwright) ---
+async def async_scrape_seoul():
     url = "https://www.seoulauction.com/auction-list/upcoming"
-    driver.get(url)
-    
-    try:
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "auction_info"))
-        )
-    except Exception as e:
-        return pd.DataFrame([{"에러": "데이터를 찾을 수 없습니다."}])
-
-    time.sleep(2)
-    auction_infos = driver.find_elements(By.CLASS_NAME, "auction_info")
-    
     data_list = []
-    for info in auction_infos:
-        item = {}
+    async with async_playwright() as p:
+        browser, context = await get_browser_context(p)
+        page = await context.new_page()
         try:
-            type_elements = info.find_elements(By.CLASS_NAME, "type")
-            item['유형/상태'] = ", ".join([t.text for t in type_elements if t.text.strip()])
-        except:
-            item['유형/상태'] = ""
+            await page.goto(url, wait_until="networkidle", timeout=60000)
+            await page.wait_for_selector(".auction_info", timeout=15000)
             
-        try:
-            title_element = info.find_element(By.CLASS_NAME, "title")
-            item['경매명'] = title_element.text.strip()
-        except:
-            item['경매명'] = ""
-            
-        try:
-            desc_area = info.find_element(By.CLASS_NAME, "description")
-            dls = desc_area.find_elements(By.TAG_NAME, "dl")
-            for dl in dls:
-                dt_text = dl.find_element(By.TAG_NAME, "dt").text.strip()
-                dd_text = dl.find_element(By.TAG_NAME, "dd").text.strip()
-                item[dt_text] = dd_text
-        except:
-            pass
-            
-        item['선택'] = False
-        item['바로가기 URL'] = url
-        data_list.append(item)
-        
+            auction_infos = await page.query_selector_all(".auction_info")
+            for info in auction_infos:
+                item = {}
+                try:
+                    types = await info.query_selector_all(".type")
+                    type_texts = [await t.inner_text() for t in types]
+                    item['유형/상태'] = ", ".join([t.strip() for t in type_texts if t.strip()])
+                except: item['유형/상태'] = ""
+                
+                try:
+                    title_el = await info.query_selector(".title")
+                    item['경매명'] = (await title_el.inner_text()).strip()
+                except: item['경매명'] = ""
+                
+                try:
+                    dls = await info.query_selector_all(".description dl")
+                    for dl in dls:
+                        dt = await dl.query_selector("dt")
+                        dd = await dl.query_selector("dd")
+                        dt_text = (await dt.inner_text()).strip()
+                        dd_text = (await dd.inner_text()).strip()
+                        item[dt_text] = dd_text
+                except: pass
+                
+                item['선택'] = False
+                item['바로가기 URL'] = url
+                data_list.append(item)
+        except Exception as e:
+            print(f"Seoul Auction error: {e}")
+        finally:
+            await browser.close()
     return pd.DataFrame(data_list)
 
 # --- 2. 케이옥션 출품작 데이터 수집 ---
-def scrape_kauction(driver):
-    # page_size를 100으로 늘려 더 많은 데이터를 한 번에 가져옵니다.
+# --- 2. 케이옥션 데이터 수집 (Playwright) ---
+async def async_scrape_kauction():
     url = "https://www.k-auction.com/Auction/Premium/225?page_size=100&page_type=P&auc_kind=2&auc_num=225&work_type=2672"
-    driver.get(url)
-    
-    try:
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "artwork"))
-        )
-    except Exception as e:
-        return pd.DataFrame([{"에러": "데이터를 찾을 수 없습니다."}])
-
-    # 경매 상단 정보 가져오기
-    auction_title = ""
-    auction_schedule = ""
-    auction_location = ""
-    try:
-        subtop = driver.find_element(By.CLASS_NAME, "subtop-desc")
-        auction_title = subtop.find_element(By.TAG_NAME, "h1").text.strip()
-        p_tag = subtop.find_element(By.TAG_NAME, "p")
-        auction_schedule = p_tag.find_element(By.TAG_NAME, "strong").text.strip()
-        auction_location = p_tag.find_element(By.TAG_NAME, "span").text.strip()
-    except:
-        pass
-
-    # 스크롤 다운 (회수를 10회에서 30회로 늘려 모든 항목 로딩 보장)
-    last_height = driver.execute_script("return document.body.scrollHeight")
-    scroll_count = 0
-    max_scrolls = 30 
-    while scroll_count < max_scrolls:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(3) # 로딩 대기 시간 약간 상향
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-            if driver.execute_script("return document.body.scrollHeight") == last_height:
-                break
-        last_height = new_height
-        scroll_count += 1
-
-    time.sleep(2)
-    artworks = driver.find_elements(By.CLASS_NAME, "artwork")
-    
     data_list = []
-    for art in artworks:
-        item = {}
-        try: item['Lot'] = art.find_element(By.CLASS_NAME, "lot").text.strip()
-        except: item['Lot'] = ""
+    async with async_playwright() as p:
+        browser, context = await get_browser_context(p)
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=60000)
+            await page.wait_for_selector(".artwork", timeout=15000)
             
-        try:
-            img_tag = art.find_element(By.TAG_NAME, "img")
-            img_url = img_tag.get_attribute("src")
-            if not img_url or "sack_work_end.png" in img_url:
-                img_url = img_tag.get_attribute("data-src")
-            item['이미지 URL'] = img_url
-        except:
-            item['이미지 URL'] = ""
+            # 경매 상단 정보
+            auction_title = ""
+            auction_schedule = ""
+            auction_location = ""
+            try:
+                subtop = await page.query_selector(".subtop-desc")
+                if subtop:
+                    h1 = await subtop.query_selector("h1")
+                    auction_title = (await h1.inner_text()).strip()
+                    p_tag = await subtop.query_selector("p")
+                    strong = await p_tag.query_selector("strong")
+                    auction_schedule = (await strong.inner_text()).strip()
+                    span = await p_tag.query_selector("span")
+                    auction_location = (await span.inner_text()).strip()
+            except: pass
 
-        try: item['작가명'] = art.find_element(By.CLASS_NAME, "card-title").text.strip()
-        except: item['작가명'] = ""
+            # 스크롤링
+            last_height = await page.evaluate("document.body.scrollHeight")
+            for _ in range(30):
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(2)
+                new_height = await page.evaluate("document.body.scrollHeight")
+                if new_height == last_height: break
+                last_height = new_height
 
-        try: item['작품명'] = art.find_element(By.CLASS_NAME, "card-subtitle").text.strip()
-        except: item['작품명'] = ""
+            artworks = await page.query_selector_all(".artwork")
+            for art in artworks:
+                item = {}
+                try:
+                    lot_el = await art.query_selector(".lot")
+                    item['Lot'] = (await lot_el.inner_text()).strip()
+                except: item['Lot'] = ""
+                
+                try:
+                    img_el = await art.query_selector("img")
+                    img_url = await img_el.get_attribute("src")
+                    if not img_url or "sack_work_end.png" in img_url:
+                        img_url = await img_el.get_attribute("data-src")
+                    item['이미지 URL'] = img_url
+                except: item['이미지 URL'] = ""
 
-        try:
-            desc_ps = art.find_elements(By.CSS_SELECTOR, "p.description span")
-            if len(desc_ps) >= 2:
-                item['재질'] = desc_ps[0].text.strip()
-                item['사이즈/연도'] = desc_ps[1].text.strip()
-            elif len(desc_ps) == 1:
-                item['재질/사이즈'] = desc_ps[0].text.strip()
-        except: pass
-            
-        try:
-            price_div = art.find_element(By.CLASS_NAME, "dotted")
-            price_lis = price_div.find_elements(By.TAG_NAME, "li")
-            for i, li in enumerate(price_lis):
-                if "추정가" in li.text: item['추정가'] = price_lis[i+1].text.strip()
-                elif "시작가" in li.text: item['시작가'] = price_lis[i+1].text.strip()
-        except: pass
+                try:
+                    title_el = await art.query_selector(".card-title")
+                    item['작가명'] = (await title_el.inner_text()).strip()
+                except: item['작가명'] = ""
 
-        try:
-            card_texts = art.find_elements(By.CLASS_NAME, "card-text")
-            if len(card_texts) >= 2:
-                item['마감 시간'] = card_texts[-1].text.strip()
-        except: pass
-            
-        try:
-            link_tag = art.find_element(By.CLASS_NAME, "listimg")
-            detail_url = link_tag.get_attribute("href")
-            item['바로가기 URL'] = detail_url if detail_url else url
-        except:
-            item['바로가기 URL'] = url
-            
-        item['경매명'] = auction_title
-        item['일정'] = auction_schedule
-        item['전시장소'] = auction_location
+                try:
+                    subtitle_el = await art.query_selector(".card-subtitle")
+                    item['작품명'] = (await subtitle_el.inner_text()).strip()
+                except: item['작품명'] = ""
 
-        data_list.append(item)
-        
+                try:
+                    desc_spans = await art.query_selector_all("p.description span")
+                    if len(desc_spans) >= 2:
+                        item['재질'] = (await desc_spans[0].inner_text()).strip()
+                        item['사이즈/연도'] = (await desc_spans[1].inner_text()).strip()
+                except: pass
+
+                try:
+                    price_lis = await art.query_selector_all(".dotted li")
+                    for i in range(len(price_lis)):
+                        txt = await price_lis[i].inner_text()
+                        if "추정가" in txt and i+1 < len(price_lis):
+                            item['추정가'] = (await price_lis[i+1].inner_text()).strip()
+                        elif "시작가" in txt and i+1 < len(price_lis):
+                            item['시작가'] = (await price_lis[i+1].inner_text()).strip()
+                except: pass
+
+                try:
+                    card_texts = await art.query_selector_all(".card-text")
+                    if card_texts:
+                        item['마감 시간'] = (await card_texts[-1].inner_text()).strip()
+                except: pass
+
+                try:
+                    link_el = await art.query_selector(".listimg")
+                    item['바로가기 URL'] = await link_el.get_attribute("href")
+                except: item['바로가기 URL'] = url
+
+                item['경매명'] = auction_title
+                item['일정'] = auction_schedule
+                item['전시장소'] = auction_location
+                data_list.append(item)
+        except Exception as e:
+            print(f"K-Auction error: {e}")
+        finally:
+            await browser.close()
+    
     df = pd.DataFrame(data_list)
     if not df.empty:
         df.insert(0, "선택", False)
     return df
 
 # --- 3. 칸옥션 공지 정보 수집 ---
-def scrape_kan(driver):
+# --- 3. 칸옥션 공지 (Playwright) ---
+async def async_scrape_kan():
     url = "http://www.kanauction.kr/auction/going/main"
-    driver.get(url)
-    time.sleep(3)
-    
-    item = {}
-    try:
-        elements = driver.find_elements(By.TAG_NAME, "div")
-        info_text = ""
-        for el in elements:
-            if el.get_attribute("style") in ["text-align:center", "text-align: center;"]:
-                info_text = el.text.strip()
-                if info_text and ("경매" in info_text or "칸옥션" in info_text):
+    item = {'바로가기 URL': url}
+    async with async_playwright() as p:
+        browser, context = await get_browser_context(p)
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            divs = await page.query_selector_all("div")
+            info_text = ""
+            for div in divs:
+                txt = (await div.inner_text()).strip()
+                if "칸옥션" in txt and "경매" in txt:
+                    info_text = txt
                     break
-        
-        if not info_text:
-            for el in elements:
-                text = el.text.strip()
-                if "칸옥션 제" in text and "미술품경매" in text and "예정" in text:
-                    info_text = text
-                    break
-                    
-        item['공지 내용'] = info_text if info_text else "경매 정보를 찾을 수 없거나 아직 등록되지 않았습니다."
-    except Exception as e:
-        item['공지 내용'] = "에러 발생"
-        
-    item['바로가기 URL'] = url
+            item['공지 내용'] = info_text if info_text else "경매 정보를 아직 등록되지 않았습니다."
+        except:
+            item['공지 내용'] = "정보를 불러올 수 없습니다."
+        finally:
+            await browser.close()
     return pd.DataFrame([item])
 
-# --- 4. 마이아트옥션 공지 정보 수집 ---
-def scrape_myart(driver):
+# --- 4. 마이아트옥션 공지 (Playwright) ---
+async def async_scrape_myart():
     url = "https://myartauction.com/auctions/ongoing"
-    driver.get(url)
-    time.sleep(3)
-    
-    item = {}
-    try:
-        page_source = driver.page_source
-        if "NO CURRENT AUCTIONS" in page_source or "새로운 경매가 곧 시작됩니다" in page_source:
-            item['공지 내용'] = "NO CURRENT AUCTIONS / 새로운 경매가 곧 시작됩니다"
-        else:
-            item['공지 내용'] = "현재 진행 중인 경매가 있습니다. (상세 내역은 홈페이지를 참고하세요)"
-    except Exception as e:
-        item['공지 내용'] = "에러 발생"
-        
-    item['바로가기 URL'] = url
+    item = {'바로가기 URL': url}
+    async with async_playwright() as p:
+        browser, context = await get_browser_context(p)
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            source = await page.content()
+            if "NO CURRENT AUCTIONS" in source or "새로운 경매가 곧 시작됩니다" in source:
+                item['공지 내용'] = "NO CURRENT AUCTIONS / 새로운 경매가 곧 시작됩니다"
+            else:
+                item['공지 내용'] = "현재 진행 중인 경매가 있습니다."
+        except:
+            item['공지 내용'] = "에러 발생"
+        finally:
+            await browser.close()
     return pd.DataFrame([item])
 
 # --- 5. 이베이(eBay) 검색 결과 수집 ---
@@ -458,16 +436,14 @@ if st.button("🚀 실시간 데이터 수집", type="primary", use_container_wi
     st.session_state['ebay_ko_excel_ready'] = False
     st.session_state['ebay_en_excel_ready'] = False
     
-    driver = init_driver()
     with st.status("데이터 수집 중...", expanded=True) as status:
         st.write("🏃 서울옥션 수집 중...")
-        st.session_state['df_seoul'] = scrape_seoul(driver)
+        st.session_state['df_seoul'] = asyncio.run(async_scrape_seoul())
         st.write("🏃 케이옥션 수집 중...")
-        st.session_state['df_kauction'] = scrape_kauction(driver)
+        st.session_state['df_kauction'] = asyncio.run(async_scrape_kauction())
         st.write("🏃 칸옥션/마이아트 수집 중...")
-        st.session_state['df_kan'] = scrape_kan(driver)
-        st.session_state['df_myart'] = scrape_myart(driver)
-        driver.quit()
+        st.session_state['df_kan'] = asyncio.run(async_scrape_kan())
+        st.session_state['df_myart'] = asyncio.run(async_scrape_myart())
         st.write("🏃 이베이 수집 중...")
         st.session_state['df_ebay_ko'] = scrape_ebay(ebay_keyword_ko)
         st.session_state['df_ebay_en'] = scrape_ebay(ebay_keyword_en)
