@@ -19,24 +19,19 @@ import asyncio
 import sys
 import tempfile
 from playwright.async_api import async_playwright
-import time
-import io
-import requests
-from openpyxl import Workbook
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font
-import asyncio
-import sys
-import tempfile
-from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
 # --- 브라우저 설정 ---
 # --- 브라우저 설정 helper ---
 async def get_browser_context(p):
     browser = await p.chromium.launch(headless=True)
     context = await browser.new_context(
-        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        viewport={'width': 1280, 'height': 800},
+        extra_http_headers={
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        }
     )
     return browser, context
 
@@ -48,6 +43,7 @@ async def async_scrape_seoul():
     async with async_playwright() as p:
         browser, context = await get_browser_context(p)
         page = await context.new_page()
+        await stealth_async(page)
         try:
             await page.goto(url, wait_until="networkidle", timeout=60000)
             await page.wait_for_selector(".auction_info", timeout=15000)
@@ -93,6 +89,7 @@ async def async_scrape_kauction():
     async with async_playwright() as p:
         browser, context = await get_browser_context(p)
         page = await context.new_page()
+        await stealth_async(page)
         try:
             await page.goto(url, wait_until="networkidle", timeout=60000)
             await page.wait_for_selector(".artwork", timeout=15000)
@@ -198,6 +195,7 @@ async def async_scrape_kan():
     async with async_playwright() as p:
         browser, context = await get_browser_context(p)
         page = await context.new_page()
+        await stealth_async(page)
         try:
             await page.goto(url, wait_until="networkidle", timeout=30000)
             divs = await page.query_selector_all("div")
@@ -221,6 +219,7 @@ async def async_scrape_myart():
     async with async_playwright() as p:
         browser, context = await get_browser_context(p)
         page = await context.new_page()
+        await stealth_async(page)
         try:
             await page.goto(url, wait_until="networkidle", timeout=30000)
             source = await page.content()
@@ -248,9 +247,15 @@ async def async_scrape_ebay(keyword):
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            viewport={'width': 1280, 'height': 800}
+            viewport={'width': 1280, 'height': 800},
+            extra_http_headers={
+                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            }
         )
         page = await context.new_page()
+        # 스텔스 모드 적용
+        await stealth_async(page)
         
         try:
             # 타임아웃을 늘리고 대기 전략을 변경합니다.
