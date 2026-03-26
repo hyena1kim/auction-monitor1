@@ -466,6 +466,9 @@ if "df_seoul" in st.session_state:
 
     tabs = st.tabs(["🏛️ 서울옥션", "🏛️ 케이옥션", "🏛️ 칸옥션", "🏛️ 마이아트옥션", "🛒 이베이(한국어)", "🛒 이베이(영어)"])
     
+    with tabs[0]:
+        st.data_editor(st.session_state.get('df_seoul', pd.DataFrame()), use_container_width=True, hide_index=True, height=600)
+
     with tabs[1]:
         col_s, col_r, _ = st.columns([1.5, 1.5, 7])
         with col_s: chk_all = st.checkbox("전체 선택", key="chk_all_k")
@@ -480,6 +483,12 @@ if "df_seoul" in st.session_state:
         
         st.data_editor(st.session_state['df_kauction'], column_config={"바로가기 URL": st.column_config.LinkColumn("상세"), "이미지 URL": st.column_config.ImageColumn("이미지")}, use_container_width=True, hide_index=True, height=600, key="kauction_editor_v2", on_change=sync_kauction_editor)
     
+    with tabs[2]:
+        st.data_editor(st.session_state.get('df_kan', pd.DataFrame()), column_config={"바로가기 URL": st.column_config.LinkColumn("상세")}, use_container_width=True, hide_index=True, height=600)
+
+    with tabs[3]:
+        st.data_editor(st.session_state.get('df_myart', pd.DataFrame()), column_config={"바로가기 URL": st.column_config.LinkColumn("상세")}, use_container_width=True, hide_index=True, height=600)
+
     with tabs[4]:
         col_s, col_r, _ = st.columns([1.5, 1.5, 7])
         with col_s: chk_all_ko = st.checkbox("전체 선택", key="chk_all_ko")
