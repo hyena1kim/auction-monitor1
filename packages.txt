@@ -2,5 +2,11 @@ chromium
 chromium-driver
 libglib2.0-0
 libnss3
-libgconf-2-4
 libfontconfig1
+libasound2
+libx11-6
+libxcomposite1
+libxdamage1
+libxrandr2
+libgbm1
+libgtk-3-0
