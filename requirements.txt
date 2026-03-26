@@ -1,0 +1,9 @@
+streamlit
+pandas
+selenium
+playwright==1.42.0
+webdriver-manager
+openpyxl
+requests
+asyncio
+greenlet==3.0.3
