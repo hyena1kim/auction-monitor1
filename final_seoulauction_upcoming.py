@@ -3,8 +3,8 @@ import time
 import asyncio
 import sys
 import urllib.parse
+import os
 
-import requests
 from playwright.async_api import async_playwright
 
 from selenium import webdriver
@@ -14,9 +14,6 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -30,26 +27,33 @@ except Exception:
 
 
 # =========================
+# 0) 유틸: 시스템 바이너리 찾기
+# =========================
+def _first_existing_path(paths):
+    for p in paths:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+# =========================
 # 1) Selenium 드라이버 생성 (Streamlit Cloud 안정화 핵심)
+#    - Selenium Manager 캐시(/home/appuser/.cache/selenium/...)를 타지 않도록
+#      /usr/bin/chromium + /usr/bin/chromedriver를 명시적으로 사용
 # =========================
 def _build_chrome_options() -> Options:
     options = Options()
 
-    # Streamlit Cloud/컨테이너 환경에서는 headless가 사실상 필수
-    # Selenium 권장 흐름: --headless=new 사용
+    # 컨테이너/리눅스 환경에서는 headless가 사실상 필수
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
 
-    # 자동화 탐지 최소화(필수는 아니지만 원본 코드에 있던 옵션 유지)
+    # 자동화 탐지 최소화(선택)
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-extensions")
-
-    # (선택) 원격 디버깅 포트는 Cloud에서 충돌/제약이 있을 수 있어 보통 제거 권장
-    # options.add_argument("--remote-debugging-port=9223")
-
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
@@ -58,23 +62,42 @@ def _build_chrome_options() -> Options:
 
 def make_driver() -> webdriver.Chrome:
     """
-    Streamlit Cloud에서 가장 잘 동작하는 구성:
-    - Chromium 기준 드라이버 설치/연결 (webdriver-manager)
-    - headless(new) + 컨테이너 필수 옵션
+    Streamlit Cloud에서 가장 예측 가능한 구성:
+    - OS(apt)로 설치된 chromium/chromedriver를 사용하도록 경로를 명시
+    - Selenium Manager가 다운받는 캐시 chromedriver를 사용하지 않게 함
     """
     options = _build_chrome_options()
 
-    # Streamlit Cloud에서 chromium-driver 설치가 꼬이거나 위치가 애매할 때
-    # webdriver-manager가 드라이버를 내려받아 Service로 연결해주는 방식이 안정적
-    service = Service(
-        ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
-    )
+    # Streamlit Cloud(데비안)에서 흔한 chromium 경로들
+    chromium_bin = _first_existing_path([
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    ])
+    if chromium_bin:
+        options.binary_location = chromium_bin
 
+    # chromedriver도 시스템 경로를 명시 (캐시 경로 사용 방지)
+    chromedriver_bin = _first_existing_path([
+        "/usr/bin/chromedriver",
+        "/usr/lib/chromium/chromedriver",
+        "/usr/lib/chromium-browser/chromedriver",
+    ])
+    if not chromedriver_bin:
+        # 마지막 fallback: 그냥 Service()를 쓰면 Selenium Manager가 캐시로 받을 수 있음
+        # 하지만 여기까지 오면 packages.txt 설치가 안 됐을 가능성이 큼
+        raise RuntimeError(
+            "chromedriver를 시스템에서 찾지 못했습니다. "
+            "packages.txt에 chromium/chromium-driver가 설치되었는지 확인하세요."
+        )
+
+    service = Service(chromedriver_bin)
     driver = webdriver.Chrome(service=service, options=options)
     return driver
 
 
-# Streamlit이면 드라이버를 캐시해 재실행시 반복 생성 방지
+# Streamlit이면 드라이버를 캐시해 재실행시 반복 생성 방지 (선택)
 if st is not None:
     @st.cache_resource(show_spinner=False)
     def get_driver_cached():
@@ -85,7 +108,7 @@ else:
 
 
 # =========================
-# 2) 사이트별 스크래핑 함수들 (원본 유지)
+# 2) 사이트별 스크래핑 함수들
 # =========================
 def scrape_seoul_auction(driver):
     print("\n--- 서울옥션 경매 정보 수집 시작 ---")
@@ -195,7 +218,6 @@ def scrape_k_auction(driver):
             img_url = img_tag.get_attribute("src")
             if not img_url or "sack_work_end.png" in (img_url or ""):
                 img_url = img_tag.get_attribute("data-src")
-            # 원본 요청대로 IMAGE 함수 사용 (excel에서 URL 렌더링)
             item["이미지 URL"] = img_url if img_url else ""
         except Exception:
             item["이미지 URL"] = ""
@@ -429,13 +451,17 @@ def save_to_excel_with_images(data_dict, filename):
             ws.append(["데이터가 없습니다."])
             continue
 
+        # 헤더
         ws.append(list(df.columns))
+        for c in range(1, len(df.columns) + 1):
+            ws.cell(row=1, column=c).font = Font(bold=True)
 
+        # 데이터
         for r_idx, row in enumerate(df.values, start=2):
             for c_idx, val in enumerate(row, start=1):
                 col_name = df.columns[c_idx - 1]
 
-                # 이미지 컬럼: URL이면 IMAGE 함수로 렌더링
+                # 이미지 URL -> Excel IMAGE 함수로 표시
                 if col_name in ["이미지 URL", "이미지"]:
                     img_url = val
                     if img_url and isinstance(img_url, str) and img_url.startswith("http"):
@@ -443,16 +469,9 @@ def save_to_excel_with_images(data_dict, filename):
                         ws.row_dimensions[r_idx].height = 80
                         ws.column_dimensions[get_column_letter(c_idx)].width = 25
                     else:
-                        ws.cell(row=r_idx, column=c_idx, value=str(img_url) if img_url else "")
-
-                # 나머지 값
+                        ws.cell(row=r_idx, column=c_idx).value = str(img_url) if img_url else ""
                 else:
-                    # 하이퍼링크는 이미 '=HYPERLINK()' 형태로 들어가므로 문자열로 그대로 저장
-                    ws.cell(row=r_idx, column=c_idx, value=str(val) if val else "")
-
-        # 헤더 가독성
-        for c in range(1, len(df.columns) + 1):
-            ws.cell(row=1, column=c).font = Font(bold=True)
+                    ws.cell(row=r_idx, column=c_idx).value = str(val) if val else ""
 
     wb.save(filename)
     print(f"파일 저장 완료: {filename}")
@@ -464,7 +483,6 @@ def save_to_excel_with_images(data_dict, filename):
 def main():
     print("브라우저를 초기화합니다...")
 
-    # ✅ Streamlit Cloud에서는 make_driver()가 내부적으로 Chromium+headless로 구성됨
     try:
         driver = get_driver_cached()
     except Exception as e:
@@ -477,7 +495,7 @@ def main():
     kan_data = scrape_kan_auction(driver)
     myart_data = scrape_myart_auction(driver)
 
-    # driver 종료 (Streamlit cache를 쓰면 계속 유지될 수도 있으니, 상황에 따라 quit 위치 조정 가능)
+    # driver 종료
     try:
         driver.quit()
     except Exception:
