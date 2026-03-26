@@ -247,17 +247,27 @@ async def async_scrape_ebay(keyword):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            viewport={'width': 1280, 'height': 800}
         )
         page = await context.new_page()
         
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            # 타임아웃을 늘리고 대기 전략을 변경합니다.
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(3) 
+            
+            # 스크롤링
             for _ in range(3):
-                await page.mouse.wheel(0, 1000)
+                await page.evaluate("window.scrollBy(0, 800)")
                 await asyncio.sleep(1)
             
-            items = await page.query_selector_all("li.s-item, .s-card")
+            # 항목 대기
+            try:
+                await page.wait_for_selector("li.s-item", timeout=10000)
+            except: pass
+
+            items = await page.query_selector_all("li.s-item")
             for item in items:
                 row = {'선택': False}
                 try:
