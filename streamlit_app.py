@@ -118,10 +118,12 @@ def scrape_kauction_api():
         result = resp.json()
     except Exception as e:
         print(f"K-Auction API error: {e}")
+        st.error(f"케이옥션 데이터를 불러오는데 실패했습니다: {e}")
         return pd.DataFrame()
 
     if result.get("code") != "00" or not result.get("data"):
         print(f"K-Auction API: 데이터 없음 (code={result.get('code')})")
+        st.warning(f"케이옥션 경매 데이터가 없습니다. (코드: {result.get('code')})")
         return pd.DataFrame()
 
     data_list = []
