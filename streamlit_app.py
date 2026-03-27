@@ -97,9 +97,15 @@ async def async_scrape_kauction():
         page = await context.new_page()
         await apply_stealth(page)
         try:
-            await page.goto(url, wait_until="networkidle", timeout=60000)
-            await page.wait_for_selector(".artwork", timeout=15000)
-            
+            # domcontentloaded로 먼저 로드 후 JS 렌더링 대기 (networkidle은 타임아웃 위험)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(5)
+            # .artwork가 나타날 때까지 최대 20초 대기
+            try:
+                await page.wait_for_selector(".artwork", timeout=20000)
+            except:
+                pass
+
             # 경매 상단 정보
             auction_title = ""
             auction_schedule = ""
@@ -108,86 +114,105 @@ async def async_scrape_kauction():
                 subtop = await page.query_selector(".subtop-desc")
                 if subtop:
                     h1 = await subtop.query_selector("h1")
-                    auction_title = (await h1.inner_text()).strip()
+                    if h1:
+                        auction_title = (await h1.inner_text()).strip()
                     p_tag = await subtop.query_selector("p")
-                    strong = await p_tag.query_selector("strong")
-                    auction_schedule = (await strong.inner_text()).strip()
-                    span = await p_tag.query_selector("span")
-                    auction_location = (await span.inner_text()).strip()
+                    if p_tag:
+                        strong = await p_tag.query_selector("strong")
+                        if strong:
+                            auction_schedule = (await strong.inner_text()).strip()
+                        span = await p_tag.query_selector("span")
+                        if span:
+                            auction_location = (await span.inner_text()).strip()
             except: pass
 
-            # 스크롤링
+            # 스크롤링으로 무한 스크롤 로드
             last_height = await page.evaluate("document.body.scrollHeight")
-            for _ in range(30):
+            for _ in range(20):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(2)
                 new_height = await page.evaluate("document.body.scrollHeight")
-                if new_height == last_height: break
+                if new_height == last_height:
+                    break
                 last_height = new_height
 
             artworks = await page.query_selector_all(".artwork")
+
             for art in artworks:
                 item = {}
+                # Lot 번호
                 try:
-                    lot_el = await art.query_selector(".lot")
+                    lot_el = await art.query_selector("div.lot")
                     item['Lot'] = (await lot_el.inner_text()).strip()
                 except: item['Lot'] = ""
-                
+
+                # 이미지 URL (src 우선, 없으면 data-src)
                 try:
                     img_el = await art.query_selector("img")
-                    img_url = await img_el.get_attribute("src")
+                    img_url = await img_el.get_attribute("src") if img_el else ""
                     if not img_url or "sack_work_end.png" in img_url:
-                        img_url = await img_el.get_attribute("data-src")
-                    item['이미지 URL'] = img_url
+                        img_url = await img_el.get_attribute("data-src") if img_el else ""
+                    item['이미지 URL'] = img_url or ""
                 except: item['이미지 URL'] = ""
 
+                # 작가명
                 try:
-                    title_el = await art.query_selector(".card-title")
-                    item['작가명'] = (await title_el.inner_text()).strip()
+                    title_el = await art.query_selector("h5.card-title")
+                    item['작가명'] = (await title_el.inner_text()).strip() if title_el else ""
                 except: item['작가명'] = ""
 
+                # 작품명
                 try:
-                    subtitle_el = await art.query_selector(".card-subtitle")
-                    item['작품명'] = (await subtitle_el.inner_text()).strip()
+                    subtitle_el = await art.query_selector("h5.card-subtitle")
+                    item['작품명'] = (await subtitle_el.inner_text()).strip() if subtitle_el else ""
                 except: item['작품명'] = ""
 
+                # 재질 / 사이즈
                 try:
-                    desc_spans = await art.query_selector_all("p.description span")
-                    if len(desc_spans) >= 2:
-                        item['재질'] = (await desc_spans[0].inner_text()).strip()
-                        item['사이즈/연도'] = (await desc_spans[1].inner_text()).strip()
+                    desc_el = await art.query_selector("p.description")
+                    if desc_el:
+                        desc_spans = await desc_el.query_selector_all("span")
+                        if len(desc_spans) >= 1:
+                            item['재질'] = (await desc_spans[0].inner_text()).strip()
+                        if len(desc_spans) >= 2:
+                            item['사이즈/연도'] = (await desc_spans[1].inner_text()).strip()
                 except: pass
 
+                # 추정가 (영문 "Estimate" 또는 한글 "추정가" 모두 처리)
                 try:
                     price_lis = await art.query_selector_all(".dotted li")
                     for i in range(len(price_lis)):
-                        txt = await price_lis[i].inner_text()
-                        if "추정가" in txt and i+1 < len(price_lis):
-                            item['추정가'] = (await price_lis[i+1].inner_text()).strip()
-                        elif "시작가" in txt and i+1 < len(price_lis):
-                            item['시작가'] = (await price_lis[i+1].inner_text()).strip()
+                        txt = (await price_lis[i].inner_text()).strip()
+                        if ("Estimate" in txt or "추정가" in txt) and i + 1 < len(price_lis):
+                            item['추정가'] = (await price_lis[i + 1].inner_text()).strip()
+                        elif ("Start" in txt or "시작가" in txt) and i + 1 < len(price_lis):
+                            item['시작가'] = (await price_lis[i + 1].inner_text()).strip()
                 except: pass
 
+                # 마감 시간 (마지막 .card-text)
                 try:
                     card_texts = await art.query_selector_all(".card-text")
                     if card_texts:
                         item['마감 시간'] = (await card_texts[-1].inner_text()).strip()
                 except: pass
 
+                # 상세 URL
                 try:
-                    link_el = await art.query_selector(".listimg")
-                    item['바로가기 URL'] = await link_el.get_attribute("href")
+                    link_el = await art.query_selector("a.listimg")
+                    href = await link_el.get_attribute("href") if link_el else None
+                    item['바로가기 URL'] = href if href else url
                 except: item['바로가기 URL'] = url
 
                 item['경매명'] = auction_title
                 item['일정'] = auction_schedule
                 item['전시장소'] = auction_location
                 data_list.append(item)
+
         except Exception as e:
             print(f"K-Auction error: {e}")
         finally:
             await browser.close()
-    
+
     df = pd.DataFrame(data_list)
     if not df.empty:
         df.insert(0, "선택", False)
