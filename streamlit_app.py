@@ -87,80 +87,105 @@ async def async_scrape_seoul():
             await browser.close()
     return pd.DataFrame(data_list)
 
-# --- 2. 케이옥션 데이터 수집 (JSON API 직접 호출) ---
-def scrape_kauction_api():
-    """Playwright 없이 케이옥션 내부 JSON API를 직접 호출."""
-    import urllib.parse
-    # auc_kind=1(Major), auc_num=196
-    api_url = "https://www.k-auction.com/api/Auction/1/196"
-    params = urllib.parse.urlencode({
-        "page": 1,
-        "page_size": 200,
-        "page_type": "P",
-        "artist_sort": "",
-        "work_type": "2669",
-    })
-    full_url = f"{api_url}?{params}"
+# --- 2. 케이옥션 출품작 데이터 수집 ---
+async def async_scrape_kauction():
+    """Playwright로 케이옥션 우회 접속 후 내부 fetch API로 데이터 수집"""
+    url = "https://www.k-auction.com/Auction/Major/196?work_type=2669&page_size=10&page_type=P&auc_kind=1&auc_num=196"
     page_url_base = "https://www.k-auction.com"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-        "Referer": "https://www.k-auction.com/Auction/Major/196",
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        resp = requests.get(full_url, headers=headers, timeout=30, verify=False)
-        resp.raise_for_status()
-        result = resp.json()
-    except Exception as e:
-        print(f"K-Auction API error: {e}")
-        st.error(f"케이옥션 데이터를 불러오는데 실패했습니다: {e}")
-        return pd.DataFrame()
-
-    if result.get("code") != "00" or not result.get("data"):
-        print(f"K-Auction API: 데이터 없음 (code={result.get('code')})")
-        st.warning(f"케이옥션 경매 데이터가 없습니다. (코드: {result.get('code')})")
-        return pd.DataFrame()
-
     data_list = []
-    for item in result["data"]:
-        row = {}
-        row['Lot']       = f"Lot {item.get('lot_num', '')}"
-        row['작가명']    = item.get('artist_name', '')
-        row['작품명']    = item.get('title', '')
-        row['재질']      = item.get('material', '')
-        row['사이즈/연도'] = item.get('size', '')
-        # 추정가
-        low  = item.get('price_estimated_low', '')
-        high = item.get('price_estimated_high', '')
-        if low or high:
-            row['추정가'] = f"KRW {int(low):,} ~ {int(high):,}" if low and high else str(low or high)
-        else:
-            row['추정가'] = ''
-        # 시작가
-        start = item.get('price_start', '')
-        row['시작가'] = f"KRW {int(start):,}" if start else ''
-        # 마감 시간
-        row['마감 시간'] = item.get('end_time', '')
-        # 이미지 URL
-        row['이미지 URL'] = item.get('thum_file_url', '') or item.get('img_file_url', '')
-        # 상세 URL
-        work_link = item.get('work_link', '')
-        row['바로가기 URL'] = (page_url_base + work_link) if work_link else page_url_base
-        # 경매 정보
-        row['경매명']  = item.get('auc_title', '')
-        row['일정']    = item.get('auc_date', '')
-        data_list.append(row)
+    
+    async with async_playwright() as p:
+        browser, context = await get_browser_context(p)
+        page = await context.new_page()
+        await apply_stealth(page)
+        
+        try:
+            # 1. 사이트 접속으로 WAF 쿠키 및 브라우저 지문 통과 (networkidle 대기 안함)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(3)
+            
+            # 2. 통과된 브라우저 컨텍스트 내에서 API 직접 호출
+            api_url = "/api/Auction/1/196?page=1&page_size=200&page_type=P&work_type=2669"
+            result = await page.evaluate(f'''async () => {{
+                try {{
+                    const resp = await fetch("{api_url}", {{
+                        method: "POST",
+                        headers: {{
+                            "Content-Type": "application/json",
+                            "Accept": "application/json, text/javascript, */*; q=0.01",
+                            "X-Requested-With": "XMLHttpRequest"
+                        }},
+                        body: JSON.stringify({{page: 1, page_size: 200, page_type: "P", work_type: "2669"}})
+                    }});
+                    return await resp.json();
+                }} catch (e) {{
+                    return {{error: e.toString()}};
+                }}
+            }}''')
 
+            if result and result.get("code") == "00" and result.get("data"):
+                # 경매 상단 정보 (HTML 추출 유지)
+                auction_title = ""
+                auction_schedule = ""
+                auction_location = ""
+                try:
+                    subtop = await page.query_selector(".subtop-desc")
+                    if subtop:
+                        h1 = await subtop.query_selector("h1")
+                        if h1: auction_title = (await h1.inner_text()).strip()
+                        p_tag = await subtop.query_selector("p")
+                        if p_tag:
+                            strong = await p_tag.query_selector("strong")
+                            if strong: auction_schedule = (await strong.inner_text()).strip()
+                            span = await p_tag.query_selector("span")
+                            if span: auction_location = (await span.inner_text()).strip()
+                except: pass
+
+                # 데이터 파싱
+                for item in result["data"]:
+                    row = {}
+                    row['Lot']       = f"Lot {item.get('lot_num', '')}"
+                    row['작가명']    = item.get('artist_name', '')
+                    row['작품명']    = item.get('title', '')
+                    row['재질']      = item.get('material', '')
+                    row['사이즈/연도'] = item.get('size', '')
+                    
+                    # 추정가
+                    low = item.get('price_estimated_low', '')
+                    high = item.get('price_estimated_high', '')
+                    if low or high:
+                        row['추정가'] = f"KRW {int(low):,} ~ {int(high):,}" if low and high else str(low or high)
+                    else:
+                        row['추정가'] = ''
+                    
+                    # 시작가
+                    start = item.get('price_start', '')
+                    row['시작가'] = f"KRW {int(start):,}" if start else ''
+                    row['마감 시간'] = item.get('end_time', '')
+                    row['이미지 URL'] = item.get('thum_file_url', '') or item.get('img_file_url', '')
+                    
+                    # 상세 URL
+                    work_link = item.get('work_link', '')
+                    row['바로가기 URL'] = (page_url_base + work_link) if work_link else url
+                    row['경매명']  = auction_title or item.get('auc_title', '')
+                    row['일정']    = auction_schedule or item.get('auc_date', '')
+                    row['전시장소'] = auction_location
+                    
+                    data_list.append(row)
+            else:
+                print(f"K-Auction fetch error or no data: {result}")
+                st.error(f"케이옥션 데이터를 불러오는데 실패했습니다: {result.get('error', '데이터 없음')}")
+
+        except Exception as e:
+            print(f"K-Auction playwright error: {e}")
+            st.error(f"케이옥션 접속 오류: {e}")
+        finally:
+            await browser.close()
+            
     df = pd.DataFrame(data_list)
     if not df.empty:
         df.insert(0, "선택", False)
     return df
-
 
 
 # --- 3. 칸옥션 공지 정보 수집 ---
@@ -431,7 +456,7 @@ if st.button("🚀 실시간 데이터 수집", type="primary", use_container_wi
         st.write("🏃 서울옥션 수집 중...")
         st.session_state['df_seoul'] = asyncio.run(async_scrape_seoul())
         st.write("🏃 케이옥션 수집 중...")
-        st.session_state['df_kauction'] = scrape_kauction_api()
+        st.session_state['df_kauction'] = asyncio.run(async_scrape_kauction())
         st.write("🏃 칸옥션/마이아트 수집 중...")
         st.session_state['df_kan'] = asyncio.run(async_scrape_kan())
         st.session_state['df_myart'] = asyncio.run(async_scrape_myart())
