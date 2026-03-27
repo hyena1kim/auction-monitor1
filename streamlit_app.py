@@ -90,7 +90,7 @@ async def async_scrape_seoul():
 # --- 2. 케이옥션 출품작 데이터 수집 ---
 # --- 2. 케이옥션 데이터 수집 (Playwright) ---
 async def async_scrape_kauction():
-    url = "https://www.k-auction.com/Auction/Premium/225?page_size=100&page_type=P&auc_kind=2&auc_num=225&work_type=2672"
+    url = "https://www.k-auction.com/Auction/Major/196?work_type=2669&page_size=10&page_type=P&auc_kind=1&auc_num=196"
     data_list = []
     async with async_playwright() as p:
         browser, context = await get_browser_context(p)
