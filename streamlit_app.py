@@ -92,77 +92,6 @@ async def async_scrape_seoul():
             await browser.close()
     return pd.DataFrame(data_list)
 
-# --- 2. 케이옥션 예정 경매 정보 수집 ---
-async def async_scrape_kauction():
-    """Playwright로 케이옥션 접속 후 홈페이지 예정 경매 목록 수집 (서울옥션과 동일 구성)"""
-    url = "https://www.k-auction.com/"
-    data_list = []
-    
-    async with async_playwright() as p:
-        browser, context = await get_browser_context(p)
-        page = await context.new_page()
-        await apply_stealth(page)
-        
-        try:
-            # 1. 사이트 접속
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(3)
-            
-            # 2. 브라우저 내에서 경매 정보 직접 추출
-            script = '''() => {
-                const results = [];
-                const titles = document.querySelectorAll('a.title');
-                titles.forEach(a => {
-                    const b = a.querySelector('b');
-                    if (!b) return;
-                    const spanTitle = b.querySelector('span');
-                    const iType = b.querySelector('i');
-                    const statusSpan = a.querySelector('.status');
-                    
-                    let title = spanTitle ? spanTitle.innerText.trim() : '';
-                    let auctionType = iType ? iType.innerText.trim() : '';
-                    let status = statusSpan ? statusSpan.innerText.trim() : '';
-                    
-                    let link = 'https://www.k-auction.com/';
-                    const strong = a.querySelector('strong');
-                    if (strong && strong.id) {
-                        if (strong.id.startsWith('major-')) {
-                            link = 'https://www.k-auction.com/Auction/Major/' + strong.id.split('-')[1];
-                        } else if (strong.id.startsWith('premium-')) {
-                            link = 'https://www.k-auction.com/Auction/Premium/' + strong.id.split('-')[1];
-                        } else if (strong.id.startsWith('weekly-')) {
-                            link = 'https://www.k-auction.com/Auction/Weekly/' + strong.id.split('-')[1];
-                        }
-                    }
-                    
-                    if (title) {
-                        results.push({
-                            '유형/상태': auctionType,
-                            '경매명': title,
-                            '상태': status,
-                            '바로가기 URL': link
-                        });
-                    }
-                });
-                return results;
-            }'''
-            
-            items = await page.evaluate(script)
-            if items:
-                data_list.extend(items)
-            else:
-                print("No auction titles found.")
-
-        except Exception as e:
-            print(f"K-Auction playwright error: {e}")
-            st.error(f"케이옥션 접속 오류: {e}")
-        finally:
-            await browser.close()
-            
-    df = pd.DataFrame(data_list)
-    if not df.empty:
-        df.insert(0, "선택", False)
-    return df
 
 
 # --- 3. 칸옥션 공지 정보 수집 ---
@@ -384,14 +313,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def sync_kauction_editor():
-    if "kauction_editor_v2" in st.session_state:
-        edits = st.session_state["kauction_editor_v2"]["edited_rows"]
-        for idx_str, change in edits.items():
-            idx = int(idx_str)
-            for col, val in change.items():
-                st.session_state['df_kauction'].at[idx, col] = val
-
 def sync_ebay_ko_editor():
     if "ebay_ko_editor" in st.session_state:
         edits = st.session_state["ebay_ko_editor"]["edited_rows"]
@@ -427,15 +348,12 @@ with col_kw2: ebay_keyword_en = st.text_input("🔍 이베이 영어 검색어",
 col_sc1, col_sc2, col_sc3 = st.columns([5, 2, 5])
 with col_sc2:
     if st.button("🚀 실시간 데이터 수집", use_container_width=True):
-        st.session_state['kauction_excel_ready'] = False
         st.session_state['ebay_ko_excel_ready'] = False
         st.session_state['ebay_en_excel_ready'] = False
         
         with st.status("데이터 수집 중...", expanded=True) as status:
             st.write("🏃 서울옥션 수집 중...")
             st.session_state['df_seoul'] = asyncio.run(async_scrape_seoul())
-            st.write("🏃 케이옥션 수집 중...")
-            st.session_state['df_kauction'] = asyncio.run(async_scrape_kauction())
             st.write("🏃 칸옥션/마이아트 수집 중...")
             st.session_state['df_kan'] = asyncio.run(async_scrape_kan())
             st.session_state['df_myart'] = asyncio.run(async_scrape_myart())
@@ -450,7 +368,7 @@ if "df_seoul" in st.session_state:
     col_dl1, col_dl2 = st.columns([10, 2])
     with col_dl2:
         if st.button("📊 통합 엑셀 생성", use_container_width=True):
-            dfs = {"서울옥션": st.session_state.get('df_seoul'), "케이옥션": st.session_state.get('df_kauction'), "칸옥션": st.session_state.get('df_kan'), "마이아트옥션": st.session_state.get('df_myart'), "이베이(한국어)": st.session_state.get('df_ebay_ko'), "이베이(영어)": st.session_state.get('df_ebay_en')}
+            dfs = {"서울옥션": st.session_state.get('df_seoul'), "칸옥션": st.session_state.get('df_kan'), "마이아트옥션": st.session_state.get('df_myart'), "이베이(한국어)": st.session_state.get('df_ebay_ko'), "이베이(영어)": st.session_state.get('df_ebay_en')}
             all_excel_bytes = get_multi_sheet_excel(dfs)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                 tmp.write(all_excel_bytes)
@@ -463,21 +381,19 @@ if "df_seoul" in st.session_state:
                 
     st.divider()
 
-    tabs = st.tabs(["🏛️ 서울옥션", "🏛️ 케이옥션", "🏛️ 칸옥션", "🏛️ 마이아트옥션", "🛒 이베이(한국어)", "🛒 이베이(영어)"])
+    tabs = st.tabs(["🏛️ 서울옥션", "🏛️ 칸옥션", "🏛️ 마이아트옥션", "🛒 이베이(한국어)", "🛒 이베이(영어)"])
     
     with tabs[0]:
         st.data_editor(st.session_state.get('df_seoul', pd.DataFrame()), use_container_width=True, hide_index=True, height=600)
 
-    with tabs[1]:
-        st.data_editor(st.session_state.get('df_kauction', pd.DataFrame()), column_config={"바로가기 URL": st.column_config.LinkColumn("상세")}, use_container_width=True, hide_index=True, height=600)
     
-    with tabs[2]:
+    with tabs[1]:
         st.data_editor(st.session_state.get('df_kan', pd.DataFrame()), column_config={"바로가기 URL": st.column_config.LinkColumn("상세")}, use_container_width=True, hide_index=True, height=600)
 
-    with tabs[3]:
+    with tabs[2]:
         st.data_editor(st.session_state.get('df_myart', pd.DataFrame()), column_config={"바로가기 URL": st.column_config.LinkColumn("상세")}, use_container_width=True, hide_index=True, height=600)
 
-    with tabs[4]:
+    with tabs[3]:
         col_s, col_r, _ = st.columns([1.5, 1.5, 7])
         with col_s: chk_all_ko = st.checkbox("전체 선택", key="chk_all_ko")
         if chk_all_ko != st.session_state.get('prev_chk_ko', False):
@@ -498,7 +414,7 @@ if "df_seoul" in st.session_state:
                 excel_bytes_ko = get_excel_data(selected_ko, "이베이(한국어)")
                 st.download_button("📥 선택 항목 엑셀 다운로드", data=excel_bytes_ko, file_name="ebay_ko_selected.xlsx", key="dl_ebay_ko", use_container_width=True)
 
-    with tabs[5]:
+    with tabs[4]:
         col_s, _ = st.columns([1.5, 8.5])
         with col_s: chk_all_en = st.checkbox("전체 선택", key="chk_all_en")
         if chk_all_en != st.session_state.get('prev_chk_en', False):
