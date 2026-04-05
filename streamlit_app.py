@@ -157,53 +157,56 @@ async def async_scrape_ebay(keyword):
         await apply_stealth(page)
         try:
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             except Exception as e:
                 print(f"Ebay navigation timeout (ignored): {e}")
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             
             for _ in range(3):
                 await page.mouse.wheel(0, 1000)
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.8)
                 
-            items = await page.query_selector_all("li.s-item, .s-card")
+            # eBay가 DOM 구조 변경: li.s-item → li.s-card (2024/2025 업데이트)
+            # 두 셀렉터를 모두 시도
+            items = await page.query_selector_all("ul.srp-results > li.s-card, li.s-item")
+            print(f"[eBay] '{keyword}': {len(items)} items found")
+            
             for item in items:
                 row = {'선택': False}
                 try:
-                    title_el = await item.query_selector(".s-item__title, .s-card__title, div[role='heading']")
+                    # 새 구조: .s-card__title .su-styled-text, 구 구조: .s-item__title
+                    title_el = await item.query_selector(".s-card__title .su-styled-text, .s-card__title, .s-item__title")
                     if not title_el: continue
                     title = await title_el.inner_text()
-                    title = title.replace("새 창 또는 새 탭에서 열림", "").strip()
+                    title = title.replace("새 창 또는 새 탭에서 열림", "").replace("New Listing", "").strip()
                     if not title or title in ["Shop on eBay", "eBay 상품 더보기", "관련 상품"]: continue
                     row['항목명'] = title
                 except: continue
                 
                 try:
-                    price_el = await item.query_selector(".s-item__price, .s-card__price, .s-item__price span")
+                    price_el = await item.query_selector(".s-card__price, .s-item__price")
                     row['가격 정보'] = await price_el.inner_text() if price_el else ""
                 except: row['가격 정보'] = ""
                 
                 try:
-                    shipping_el = await item.query_selector(".s-item__shipping, .s-item__logisticsCost, .s-card__shipping, .s-item__free-shipping")
-                    if not shipping_el:
-                        all_text = await item.inner_text()
-                        if "배송" in all_text or "Shipping" in all_text:
-                            shipping_el = await item.query_selector("span:has-text('배송'), span:has-text('Shipping')")
-                    row['배송 정보'] = await shipping_el.inner_text() if shipping_el else "Shipping info not found"
-                except: row['배송 정보'] = "Shipping info not found"
+                    shipping_el = await item.query_selector(".s-card__shipping-info, .s-item__shipping, .s-item__logisticsCost, .s-item__free-shipping")
+                    row['배송 정보'] = await shipping_el.inner_text() if shipping_el else ""
+                except: row['배송 정보'] = ""
                 
                 try:
-                    link_el = await item.query_selector(".s-item__link, .s-card__link, a")
+                    link_el = await item.query_selector("a.s-card__link, a.s-item__link")
                     row['바로가기'] = await link_el.get_attribute("href") if link_el else ""
                 except: row['바로가기'] = ""
                 
                 try:
-                    img_el = await item.query_selector(".s-item__image-img, .s-card__image-img, .s-card__link img, img")
-                    img_url = await img_el.get_attribute("src") if img_el else ""
-                    if not img_url or "placeholder" in img_url or "static" in img_url:
-                        img_url = await img_el.get_attribute("data-src") if img_el else img_url
-                    row['이미지'] = img_url if img_url else ""
+                    img_el = await item.query_selector(".su-image img, .s-item__image-img")
+                    img_url = ""
+                    if img_el:
+                        img_url = await img_el.get_attribute("src") or ""
+                        if not img_url or "placeholder" in img_url or "static" in img_url:
+                            img_url = await img_el.get_attribute("data-src") or ""
+                    row['이미지'] = img_url
                 except: row['이미지'] = ""
                 
                 data_list.append(row)
