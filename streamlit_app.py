@@ -141,111 +141,85 @@ async def async_scrape_myart():
     return pd.DataFrame([item])
 
 # --- 5. 이베이(eBay) 검색 결과 수집 ---
-async def async_scrape_ebay(keyword):
+def scrape_ebay(keyword):
     import urllib.parse
-    # 콤마(,) 정제 (제거하지 않고 URL 인코딩에 그대로 반영되도록 수정)
+    import requests
+    from bs4 import BeautifulSoup
+    import pandas as pd
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
     clean_keyword = keyword.strip()
     while "  " in clean_keyword: clean_keyword = clean_keyword.replace("  ", " ")
     nkw = urllib.parse.quote_plus(clean_keyword)
     url = f"https://www.ebay.com/sch/i.html?_nkw={nkw}&_sacat=0&_from=R40&_trksid=m570.l1313&_odkw={nkw}&_osacat=0"
     
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    }
+    
     data_list = []
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            viewport={'width': 1280, 'height': 800},
-            extra_http_headers={
-                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            }
-        )
-        page = await context.new_page()
-        # 스텔스 모드 적용
-        await apply_stealth(page)
-        
-        try:
-            # 타임아웃을 늘리고 대기 전략을 변경합니다.
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(3) 
+    
+    try:
+        resp = requests.get(url, headers=headers, verify=False, timeout=15)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            items = soup.select("li.s-item, li.s-card")
             
-            # 스크롤링
-            for _ in range(3):
-                await page.evaluate("window.scrollBy(0, 800)")
-                await asyncio.sleep(1)
-            
-            # 항목 대기
-            try:
-                await page.wait_for_selector("li.s-item, li.s-card", timeout=10000)
-            except: pass
-
-            items = await page.query_selector_all("li.s-item, li.s-card")
             for item in items:
                 row = {'선택': False}
-                try:
-                    title_el = await item.query_selector(".s-item__title, .s-card__title, div[role='heading']")
-                    if not title_el: continue
-                    title = await title_el.inner_text()
-                    row['항목명'] = title.replace("새 창 또는 새 탭에서 열림", "").strip()
-                    if not row['항목명'] or row['항목명'] in ["Shop on eBay", "eBay 상품 더보기", "관련 상품"]: continue
-                except: continue
                 
-                try:
-                    price_el = await item.query_selector(".s-item__price, .s-card__price, .s-item__price span")
-                    row['가격 정보'] = await price_el.inner_text() if price_el else ""
-                except: row['가격 정보'] = ""
+                # 항목명
+                title_el = item.select_one(".s-item__title, .s-card__title, div[role='heading']")
+                if not title_el: continue
+                title = title_el.text.replace("새 창 또는 새 탭에서 열림", "").strip()
+                if not title or title in ["Shop on eBay", "eBay 상품 더보기", "관련 상품", "Shop on eBay"]: continue
+                row['항목명'] = title
                 
-                try:
-                    shipping_el = await item.query_selector(".s-item__shipping, .s-item__logisticsCost, .s-card__shipping, .s-item__free-shipping")
-                    if not shipping_el:
-                        all_text = await item.inner_text()
-                        if "배송" in all_text or "Shipping" in all_text:
-                            shipping_el = await item.query_selector("span:has-text('배송'), span:has-text('Shipping')")
-                    
-                    row['배송 정보'] = await shipping_el.inner_text() if shipping_el else "Shipping info not found"
-                except: row['배송 정보'] = "Shipping info not found"
+                # 가격 정보
+                price_el = item.select_one(".s-item__price, .s-card__price, .s-item__price span")
+                row['가격 정보'] = price_el.text.strip() if price_el else ""
                 
-                try:
-                    link_el = await item.query_selector(".s-item__link, .s-card__link, a")
-                    href = await link_el.get_attribute("href")
-                    row['바로가기'] = href if href else ""
-                except: row['바로가기'] = ""
+                # 배송 정보
+                shipping_el = item.select_one(".s-item__shipping, .s-item__logisticsCost, .s-card__shipping, .s-item__free-shipping")
+                if not shipping_el:
+                    if "배송" in item.text or "Shipping" in item.text:
+                        row['배송 정보'] = "배송 정보 포함"
+                    else:
+                        row['배송 정보'] = "Shipping info not found"
+                else:
+                    row['배송 정보'] = shipping_el.text.strip()
                 
-                try:
-                    img_el = await item.query_selector(".s-item__image-img, .s-card__image-img, .s-card__link img, img")
-                    img_url = await img_el.get_attribute("src") if img_el else ""
+                # 바로가기
+                link_el = item.select_one(".s-item__link, .s-card__link, a")
+                row['바로가기'] = link_el.get('href') if link_el else ""
+                
+                # 이미지
+                img_el = item.select_one(".s-item__image-img, .s-card__image-img, .s-card__link img, img")
+                img_url = ""
+                if img_el:
+                    img_url = img_el.get('src') or ""
                     if not img_url or "placeholder" in img_url or "static" in img_url:
-                        img_url = await img_el.get_attribute("data-src") if img_el else img_url
-                    row['이미지'] = img_url if img_url else ""
-                except: row['이미지'] = ""
+                        img_url = img_el.get('data-src') or img_url
+                row['이미지'] = img_url
                 
                 data_list.append(row)
-        except Exception as e:
-            print(f"Ebay scraping error: {e}")
-        finally:
-            await browser.close()
-            
-    return data_list
-
-def scrape_ebay(keyword):
-    try:
-        data_list = asyncio.run(async_scrape_ebay(keyword))
     except Exception as e:
-        print(f"Asyncio run error: {e}")
-        data_list = []
+        print(f"Ebay scraping error: {e}")
+        
+    empty_df = pd.DataFrame([{'선택': False, '항목명': '이베이 검색 결과가 없거나 수집에 실패했습니다.', '이미지': '', '가격 정보': '', '배송 정보': '', '바로가기': ''}])
     
-    empty_df = pd.DataFrame([{'항목명': '이베이 검색 결과가 없거나 수집에 실패했습니다.'}])
-    if "선택" not in empty_df.columns:
-        empty_df.insert(0, "선택", False)
-
     if not data_list:
         return empty_df
         
     df = pd.DataFrame(data_list)
-    cols = ['항목명', '이미지', '가격 정보', '배송 정보', '바로가기']
-    df = df[cols]
-    df.insert(0, "선택", False)
-    return df
+    cols = ['선택', '항목명', '이미지', '가격 정보', '배송 정보', '바로가기']
+    for col in cols:
+        if col not in df.columns:
+            df[col] = ""
+    return df[cols]
 
 # --- 공통 엑셀 다운로드 기능 ---
 def add_df_to_sheet(ws, export_df, include_images=True):
