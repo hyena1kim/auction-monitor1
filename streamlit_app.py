@@ -24,6 +24,33 @@ from playwright.async_api import async_playwright
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+import threading
+
+def run_async_in_thread(coro):
+    """Streamlit + Windows 환경에서 asyncio 이벤트루프 충돌 방지.
+    각 코루틴을 독립 스레드에서 새 이벤트루프로 실행합니다."""
+    result = [None]
+    error = [None]
+
+    def thread_target():
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result[0] = loop.run_until_complete(coro)
+        except Exception as e:
+            error[0] = e
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=thread_target)
+    t.start()
+    t.join(timeout=180)  # 최대 3분 대기
+    if error[0]:
+        raise error[0]
+    return result[0]
+
 
 async def apply_stealth(page):
     await page.add_init_script("""
@@ -333,13 +360,14 @@ with col_sc2:
         
         with st.status("데이터 수집 중...", expanded=True) as status:
             st.write("🏃 서울옥션 수집 중...")
-            st.session_state['df_seoul'] = asyncio.run(async_scrape_seoul())
+            st.session_state['df_seoul'] = run_async_in_thread(async_scrape_seoul())
             st.write("🏃 칸옥션/마이아트 수집 중...")
-            st.session_state['df_kan'] = asyncio.run(async_scrape_kan())
-            st.session_state['df_myart'] = asyncio.run(async_scrape_myart())
-            st.write("🏃 이베이 수집 중...")
-            st.session_state['df_ebay_ko'] = asyncio.run(async_scrape_ebay(ebay_keyword_ko))
-            st.session_state['df_ebay_en'] = asyncio.run(async_scrape_ebay(ebay_keyword_en))
+            st.session_state['df_kan'] = run_async_in_thread(async_scrape_kan())
+            st.session_state['df_myart'] = run_async_in_thread(async_scrape_myart())
+            st.write("🏃 이베이(한국어) 수집 중...")
+            st.session_state['df_ebay_ko'] = run_async_in_thread(async_scrape_ebay(ebay_keyword_ko))
+            st.write("🏃 이베이(영어) 수집 중...")
+            st.session_state['df_ebay_en'] = run_async_in_thread(async_scrape_ebay(ebay_keyword_en))
             status.update(label="✅ 수집 완료!", state="complete", expanded=False)
 
 if "df_seoul" in st.session_state:
