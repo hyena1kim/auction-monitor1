@@ -140,75 +140,78 @@ async def async_scrape_myart():
             await browser.close()
     return pd.DataFrame([item])
 
-# --- 5. 이베이(eBay) 검색 결과 수집 ---
-def scrape_ebay(keyword):
+# --- 5. 이베이(eBay) 검색 결과 수집 (Playwright) ---
+async def async_scrape_ebay(keyword):
     import urllib.parse
-    import requests
-    from bs4 import BeautifulSoup
     import pandas as pd
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
+    
     clean_keyword = keyword.strip()
     while "  " in clean_keyword: clean_keyword = clean_keyword.replace("  ", " ")
     nkw = urllib.parse.quote_plus(clean_keyword)
     url = f"https://www.ebay.com/sch/i.html?_nkw={nkw}&_sacat=0&_from=R40&_trksid=m570.l1313&_odkw={nkw}&_osacat=0"
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    }
-    
     data_list = []
-    
-    try:
-        resp = requests.get(url, headers=headers, verify=False, timeout=15)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            items = soup.select("li.s-item, li.s-card")
+    async with async_playwright() as p:
+        browser, context = await get_browser_context(p)
+        page = await context.new_page()
+        await apply_stealth(page)
+        try:
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            except Exception as e:
+                print(f"Ebay navigation timeout (ignored): {e}")
+
+            await asyncio.sleep(2)
             
+            for _ in range(3):
+                await page.mouse.wheel(0, 1000)
+                await asyncio.sleep(1)
+                
+            items = await page.query_selector_all("li.s-item, .s-card")
             for item in items:
                 row = {'선택': False}
+                try:
+                    title_el = await item.query_selector(".s-item__title, .s-card__title, div[role='heading']")
+                    if not title_el: continue
+                    title = await title_el.inner_text()
+                    title = title.replace("새 창 또는 새 탭에서 열림", "").strip()
+                    if not title or title in ["Shop on eBay", "eBay 상품 더보기", "관련 상품"]: continue
+                    row['항목명'] = title
+                except: continue
                 
-                # 항목명
-                title_el = item.select_one(".s-item__title, .s-card__title, div[role='heading']")
-                if not title_el: continue
-                title = title_el.text.replace("새 창 또는 새 탭에서 열림", "").strip()
-                if not title or title in ["Shop on eBay", "eBay 상품 더보기", "관련 상품", "Shop on eBay"]: continue
-                row['항목명'] = title
+                try:
+                    price_el = await item.query_selector(".s-item__price, .s-card__price, .s-item__price span")
+                    row['가격 정보'] = await price_el.inner_text() if price_el else ""
+                except: row['가격 정보'] = ""
                 
-                # 가격 정보
-                price_el = item.select_one(".s-item__price, .s-card__price, .s-item__price span")
-                row['가격 정보'] = price_el.text.strip() if price_el else ""
+                try:
+                    shipping_el = await item.query_selector(".s-item__shipping, .s-item__logisticsCost, .s-card__shipping, .s-item__free-shipping")
+                    if not shipping_el:
+                        all_text = await item.inner_text()
+                        if "배송" in all_text or "Shipping" in all_text:
+                            shipping_el = await item.query_selector("span:has-text('배송'), span:has-text('Shipping')")
+                    row['배송 정보'] = await shipping_el.inner_text() if shipping_el else "Shipping info not found"
+                except: row['배송 정보'] = "Shipping info not found"
                 
-                # 배송 정보
-                shipping_el = item.select_one(".s-item__shipping, .s-item__logisticsCost, .s-card__shipping, .s-item__free-shipping")
-                if not shipping_el:
-                    if "배송" in item.text or "Shipping" in item.text:
-                        row['배송 정보'] = "배송 정보 포함"
-                    else:
-                        row['배송 정보'] = "Shipping info not found"
-                else:
-                    row['배송 정보'] = shipping_el.text.strip()
+                try:
+                    link_el = await item.query_selector(".s-item__link, .s-card__link, a")
+                    row['바로가기'] = await link_el.get_attribute("href") if link_el else ""
+                except: row['바로가기'] = ""
                 
-                # 바로가기
-                link_el = item.select_one(".s-item__link, .s-card__link, a")
-                row['바로가기'] = link_el.get('href') if link_el else ""
-                
-                # 이미지
-                img_el = item.select_one(".s-item__image-img, .s-card__image-img, .s-card__link img, img")
-                img_url = ""
-                if img_el:
-                    img_url = img_el.get('src') or ""
+                try:
+                    img_el = await item.query_selector(".s-item__image-img, .s-card__image-img, .s-card__link img, img")
+                    img_url = await img_el.get_attribute("src") if img_el else ""
                     if not img_url or "placeholder" in img_url or "static" in img_url:
-                        img_url = img_el.get('data-src') or img_url
-                row['이미지'] = img_url
+                        img_url = await img_el.get_attribute("data-src") if img_el else img_url
+                    row['이미지'] = img_url if img_url else ""
+                except: row['이미지'] = ""
                 
                 data_list.append(row)
-    except Exception as e:
-        print(f"Ebay scraping error: {e}")
-        
+        except Exception as e:
+             print(f"Ebay scraping error: {e}")
+        finally:
+             await browser.close()
+             
     empty_df = pd.DataFrame([{'선택': False, '항목명': '이베이 검색 결과가 없거나 수집에 실패했습니다.', '이미지': '', '가격 정보': '', '배송 정보': '', '바로가기': ''}])
     
     if not data_list:
@@ -332,8 +335,8 @@ with col_sc2:
             st.session_state['df_kan'] = asyncio.run(async_scrape_kan())
             st.session_state['df_myart'] = asyncio.run(async_scrape_myart())
             st.write("🏃 이베이 수집 중...")
-            st.session_state['df_ebay_ko'] = scrape_ebay(ebay_keyword_ko)
-            st.session_state['df_ebay_en'] = scrape_ebay(ebay_keyword_en)
+            st.session_state['df_ebay_ko'] = asyncio.run(async_scrape_ebay(ebay_keyword_ko))
+            st.session_state['df_ebay_en'] = asyncio.run(async_scrape_ebay(ebay_keyword_en))
             status.update(label="✅ 수집 완료!", state="complete", expanded=False)
 
 if "df_seoul" in st.session_state:
