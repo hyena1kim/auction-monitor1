@@ -3,5 +3,5 @@ pandas
 playwright==1.42.0
 openpyxl
 requests
-asyncio
 greenlet==3.0.3
+beautifulsoup4
